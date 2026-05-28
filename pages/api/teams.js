@@ -1,4 +1,5 @@
 import { jiraGet, OMNI_EX_MEMBERS, OMNI_SOLUTIONS_GROUP_ID } from '../../lib/jira';
+import { getCredentials } from '../../lib/credentials';
 
 const EXCLUDED = new Set([
   'org-admins', 'site-admins', 'administrators', 'confluence-users', 'tempo-SLA',
@@ -6,11 +7,12 @@ const EXCLUDED = new Set([
 
 export default async function handler(req, res) {
   if (req.method !== 'GET') return res.status(405).end();
+  const creds = getCredentials(req);
   try {
     const { groupId } = req.query;
 
     if (groupId) {
-      const data = await jiraGet(`/rest/api/3/group/member?groupId=${encodeURIComponent(groupId)}&maxResults=100`);
+      const data = await jiraGet(`/rest/api/3/group/member?groupId=${encodeURIComponent(groupId)}&maxResults=100`, creds);
       const members = (data.values || []).map(u => ({
         accountId:   u.accountId,
         displayName: u.displayName,
@@ -24,7 +26,7 @@ export default async function handler(req, res) {
       return res.status(200).json({ members });
     }
 
-    const data = await jiraGet('/rest/api/3/groups/picker?maxResults=50');
+    const data = await jiraGet('/rest/api/3/groups/picker?maxResults=50', creds);
     const groups = (data.groups || [])
       .filter(g => !EXCLUDED.has(g.name))
       .map(g => ({ name: g.name, groupId: g.groupId }))

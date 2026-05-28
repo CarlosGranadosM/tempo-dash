@@ -4,6 +4,35 @@ import * as XLSX from 'xlsx';
 // ─── Constants ────────────────────────────────────────────────────────────────
 const JIRA_URL = 'https://omnipro.atlassian.net';
 
+// ─── Credenciales (por usuario, guardadas en su navegador) ──────────────────────
+const CREDS_KEY = 'tempo-creds';
+
+function loadCreds() {
+  if (typeof window === 'undefined') return {};
+  try { return JSON.parse(localStorage.getItem(CREDS_KEY) || '{}'); }
+  catch { return {}; }
+}
+
+function saveCreds(creds) {
+  if (typeof window === 'undefined') return;
+  localStorage.setItem(CREDS_KEY, JSON.stringify(creds));
+}
+
+function credHeaders() {
+  const c = loadCreds();
+  const h = {};
+  if (c.JIRA_URL)       h['x-jira-url']    = c.JIRA_URL;
+  if (c.JIRA_EMAIL)     h['x-jira-email']  = c.JIRA_EMAIL;
+  if (c.JIRA_API_TOKEN) h['x-jira-token']  = c.JIRA_API_TOKEN;
+  if (c.TEMPO_API_TOKEN) h['x-tempo-token'] = c.TEMPO_API_TOKEN;
+  return h;
+}
+
+// Wrapper de fetch que adjunta las credenciales del usuario como headers.
+function apiFetch(url, options = {}) {
+  return fetch(url, { ...options, headers: { ...credHeaders(), ...(options.headers || {}) } });
+}
+
 const RESULTADO_OPTS = ['Se logró', 'Se logró parcialmente', 'No se logró', 'Se replanificó', 'Sin trabajo'];
 const JUSTIF_OPTS = [
   '—', 'Cambio de prioridad', 'Atención de bugs no planificados', 'Dependencias con otros equipos',
@@ -533,27 +562,25 @@ const CONFIG_FIELDS = [
   { key: 'TEMPO_API_TOKEN',   label: 'Tempo API Token',    type: 'password', placeholder: 'spSaK…' },
 ];
 
-function SettingsModal({ onClose }) {
+function SettingsModal({ onClose, onSaved }) {
   const [config, setConfig] = useState({});
-  const [saving, setSaving] = useState(false);
   const [saved,  setSaved]  = useState(false);
-  const [error,  setError]  = useState('');
   const [show,   setShow]   = useState({});
 
   useEffect(() => {
-    fetch('/api/config').then(r => r.json()).then(d => setConfig(d.config || {}));
+    setConfig(loadCreds());
   }, []);
 
-  const save = async () => {
-    setSaving(true); setError(''); setSaved(false);
-    try {
-      const r = await fetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(config) });
-      const d = await r.json();
-      if (!d.ok) throw new Error(d.error || 'Error al guardar');
-      setSaved(true);
-      setTimeout(() => setSaved(false), 2500);
-    } catch (e) { setError(e.message); }
-    finally { setSaving(false); }
+  const save = () => {
+    const cleaned = {};
+    for (const f of CONFIG_FIELDS) {
+      const v = (config[f.key] || '').trim();
+      if (v) cleaned[f.key] = v;
+    }
+    saveCreds(cleaned);
+    setSaved(true);
+    setTimeout(() => setSaved(false), 2500);
+    onSaved?.();
   };
 
   return (
@@ -569,6 +596,9 @@ function SettingsModal({ onClose }) {
           <button onClick={onClose} className="text-gray-400 hover:text-gray-600 text-xl leading-none">&times;</button>
         </div>
         <div className="px-6 py-4 space-y-3">
+          <p className="text-xs text-gray-500">
+            Tus credenciales se guardan <strong>solo en este navegador</strong> y se envían en cada consulta. No se almacenan en el servidor.
+          </p>
           {CONFIG_FIELDS.map(f => (
             <div key={f.key}>
               <label className="block text-xs font-semibold text-gray-600 mb-1">{f.label}</label>
@@ -578,6 +608,7 @@ function SettingsModal({ onClose }) {
                   value={config[f.key] || ''}
                   onChange={e => setConfig(p => ({ ...p, [f.key]: e.target.value }))}
                   placeholder={f.placeholder}
+                  autoComplete="off"
                   className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none pr-9"
                 />
                 {f.type === 'password' && (
@@ -589,7 +620,6 @@ function SettingsModal({ onClose }) {
               </div>
             </div>
           ))}
-          {error && <p className="text-xs text-red-600">{error}</p>}
 
           {/* Callout: cómo obtener los tokens */}
           {(() => {
@@ -633,10 +663,10 @@ function SettingsModal({ onClose }) {
           })()}
         </div>
         <div className="px-6 py-3 border-t flex justify-end gap-2">
-          <button onClick={onClose} className="px-4 py-2 text-sm border border-gray-300 rounded-lg hover:bg-gray-50">Cancelar</button>
-          <button onClick={save} disabled={saving}
-            className="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 flex items-center gap-1.5">
-            {saving ? 'Guardando…' : saved ? '✓ Guardado' : 'Guardar'}
+          <button onClick={onClose} className="px-4 py-2 text-sm border border-gray-300 rounded-lg hover:bg-gray-50">Cerrar</button>
+          <button onClick={save}
+            className="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 flex items-center gap-1.5">
+            {saved ? '✓ Guardado' : 'Guardar'}
           </button>
         </div>
       </div>
@@ -655,7 +685,7 @@ export default function App() {
   const applyTeam = useCallback(async (groupId) => {
     setSelectedTeamId(groupId);
     try {
-      const r = await fetch(`/api/teams?groupId=${encodeURIComponent(groupId)}`);
+      const r = await apiFetch(`/api/teams?groupId=${encodeURIComponent(groupId)}`);
       const d = await r.json();
       const members = d.members || [];
       setTeamMembers(members);
@@ -664,7 +694,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    fetch('/api/teams')
+    apiFetch('/api/teams')
       .then(r => r.json())
       .then(d => {
         const grps = d.groups || [];
@@ -676,7 +706,7 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-gray-100">
-      {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}
+      {showSettings && <SettingsModal onClose={() => setShowSettings(false)} onSaved={() => window.location.reload()} />}
       {/* Header */}
       <div className="bg-white border-b shadow-sm px-6 py-3 flex items-center gap-4">
         <div className="flex items-center gap-2">
@@ -806,7 +836,7 @@ function TimeTab({ teamIds, setTeamIds, teamMembers }) {
     try {
       const ids = [...teamIds].join(',');
       const params = new URLSearchParams({ dateFrom, dateTo, userIds: ids, all: 'true' });
-      const r = await fetch(`/api/team-time?${params}`);
+      const r = await apiFetch(`/api/team-time?${params}`);
       const d = await r.json();
       if (!r.ok) throw new Error(d.error);
       hasLoadedRef.current = true;
@@ -834,7 +864,7 @@ function TimeTab({ teamIds, setTeamIds, teamMembers }) {
     try {
       for (let i = 0; i < toLoad.length; i += BATCH) {
         const batch = toLoad.slice(i, i + BATCH);
-        const r = await fetch('/api/summarize', {
+        const r = await apiFetch('/api/summarize', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ tickets: batch.map(t => ({ key: t.key, title: t.title, type: t.type, description: t.description || '' })) }),
@@ -964,7 +994,7 @@ function TimeTab({ teamIds, setTeamIds, teamMembers }) {
   const exportExcel = async () => {
     try {
       setExportPct(50);
-      const r = await fetch('/api/export', {
+      const r = await apiFetch('/api/export', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ type: 'excel', data: { tickets: flatTickets, months, descriptions, dateFrom, dateTo, tabName: 'tiempo' } }),
@@ -1449,7 +1479,7 @@ function DetailTimeTab({ teamIds, setTeamIds, teamMembers }) {
     try {
       const ids = [...teamIds].join(',');
       const params = new URLSearchParams({ dateFrom, dateTo, userIds: ids, all: 'true' });
-      const r = await fetch(`/api/team-time?${params}`);
+      const r = await apiFetch(`/api/team-time?${params}`);
       const d = await r.json();
       if (!r.ok) throw new Error(d.error);
       hasLoadedRef.current = true;
@@ -1476,7 +1506,7 @@ function DetailTimeTab({ teamIds, setTeamIds, teamMembers }) {
     try {
       for (let i = 0; i < toLoad.length; i += BATCH) {
         const batch = toLoad.slice(i, i + BATCH);
-        const r = await fetch('/api/summarize', {
+        const r = await apiFetch('/api/summarize', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ tickets: batch.map(t => ({ key: t.key, title: t.title, type: t.type, description: t.description || '' })) }),
@@ -1580,7 +1610,7 @@ function DetailTimeTab({ teamIds, setTeamIds, teamMembers }) {
   const exportExcel = async () => {
     try {
       setExportPct(50);
-      const r = await fetch('/api/export', {
+      const r = await apiFetch('/api/export', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ type: 'excel', data: { tickets: filteredTickets, months, descriptions, dateFrom, dateTo, tabName: 'detalle' } }),
@@ -1993,7 +2023,7 @@ function GanttTimeTab({ teamIds, teamMembers }) {
     setLoading(true); setError('');
     try {
       const ids = [...teamIds].join(',');
-      const r = await fetch(`/api/gantt-time?${new URLSearchParams({ dateFrom, dateTo, userIds: ids })}`);
+      const r = await apiFetch(`/api/gantt-time?${new URLSearchParams({ dateFrom, dateTo, userIds: ids })}`);
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || 'Error');
       setData(d);
@@ -2504,13 +2534,13 @@ function ComplianceTab({ teamIds }) {
     setLoading(true); setError('');
     try {
       const keys = [...new Set(planned.map(p => p.ticket).filter(Boolean))].join(',');
-      const r = await fetch(`/api/team-time?dateFrom=${dateFrom}&dateTo=${dateTo}&keys=${encodeURIComponent(keys)}`);
+      const r = await apiFetch(`/api/team-time?dateFrom=${dateFrom}&dateTo=${dateTo}&keys=${encodeURIComponent(keys)}`);
       const d = await r.json();
       if (!r.ok) throw new Error(d.error);
 
       // Also fetch unplanned tickets worked on by team
       const ids = [...teamIds].join(',');
-      const r2  = await fetch(`/api/team-time?dateFrom=${dateFrom}&dateTo=${dateTo}&userIds=${encodeURIComponent(ids)}`);
+      const r2  = await apiFetch(`/api/team-time?dateFrom=${dateFrom}&dateTo=${dateTo}&userIds=${encodeURIComponent(ids)}`);
       const d2  = await r2.json();
 
       setJiraData({ planned: d.tickets || [], all: d2.tickets || [] });
@@ -2567,7 +2597,7 @@ function ComplianceTab({ teamIds }) {
     };
 
     try {
-      const r = await fetch('/api/chat', {
+      const r = await apiFetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ messages: msgs, context: ctx }),
@@ -2626,7 +2656,7 @@ function ComplianceTab({ teamIds }) {
   const exportExcel = async () => {
     try {
       setExportPct(30);
-      const r = await fetch('/api/export', {
+      const r = await apiFetch('/api/export', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ type: 'excel', data: { comparison, unplanned, hierarchy: [], dateFrom, dateTo } }),
@@ -2641,7 +2671,7 @@ function ComplianceTab({ teamIds }) {
 
   const exportWord = async () => {
     if (!wordText) return alert('Primero pídele a Claude que genere el documento Word.');
-    const r = await fetch('/api/export', {
+    const r = await apiFetch('/api/export', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ type: 'word', data: { docText: wordText, dateFrom, dateTo } }),

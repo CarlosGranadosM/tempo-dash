@@ -1,7 +1,7 @@
 import { resolveDisplayNames } from '../../lib/jira';
+import { getCredentials } from '../../lib/credentials';
 
-async function fetchViaTempoAPI(dateFrom, dateTo, ids) {
-  const token = process.env.TEMPO_API_TOKEN;
+async function fetchViaTempoAPI(dateFrom, dateTo, ids, token) {
   if (!token) throw new Error('TEMPO_API_TOKEN no configurado');
   const teamSet = new Set(ids);
   const all = [];
@@ -26,11 +26,12 @@ export default async function handler(req, res) {
   const { dateFrom = '2026-01-01', dateTo = '2026-03-31', userIds } = req.query;
   const ids = userIds ? userIds.split(',').map(s => s.trim()).filter(Boolean) : [];
   if (!ids.length) return res.status(400).json({ error: 'Se requiere userIds' });
+  const creds = getCredentials(req);
 
   try {
-    const tempoWls = await fetchViaTempoAPI(dateFrom, dateTo, ids);
+    const tempoWls = await fetchViaTempoAPI(dateFrom, dateTo, ids, creds.tempoToken);
     const uniqueIds = [...new Set(tempoWls.map(wl => wl.author?.accountId).filter(Boolean))];
-    const nameMap = await resolveDisplayNames(uniqueIds);
+    const nameMap = await resolveDisplayNames(uniqueIds, creds);
     const round = v => Math.round(v * 100) / 100;
 
     const personData = {};

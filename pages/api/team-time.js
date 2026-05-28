@@ -1,14 +1,15 @@
-import { jiraPost, jiraAuth, OMNI_TEAM_IDS, TICKET_FIELDS, mapTicket, JIRA_URL, resolveDisplayNames } from '../../lib/jira';
+import { jiraPost, jiraAuth, OMNI_TEAM_IDS, TICKET_FIELDS, mapTicket, resolveDisplayNames } from '../../lib/jira';
+import { getCredentials } from '../../lib/credentials';
 
 const TEMPO_ID = '557058:295406f3-a1fc-4733-b906-dd15d021bd79';
 
 // Fetch ALL worklogs for a ticket (paginated), filtered to date range
-async function fetchRangeWorklogs(key, dateFrom, dateTo, auth) {
+async function fetchRangeWorklogs(key, dateFrom, dateTo, auth, jiraUrl) {
   const all = [];
   let startAt = 0;
   while (true) {
     const r = await fetch(
-      `${JIRA_URL}/rest/api/3/issue/${key}/worklog?maxResults=100&startAt=${startAt}`,
+      `${jiraUrl}/rest/api/3/issue/${key}/worklog?maxResults=100&startAt=${startAt}`,
       { headers: { Authorization: `Basic ${auth}`, Accept: 'application/json' } }
     );
     if (!r.ok) break;
@@ -37,8 +38,7 @@ function aggregateWorklogs(rangeWls) {
   return { wlRangeSecs, wlRangeHours: round(wlRangeSecs / 3600), wlByMonth: byMonth };
 }
 
-async function fetchViaTempoAPI(dateFrom, dateTo, ids) {
-  const token = process.env.TEMPO_API_TOKEN;
+async function fetchViaTempoAPI(dateFrom, dateTo, ids, token) {
   const teamSet = new Set(ids);
   const all = [];
   let offset = 0;
@@ -101,8 +101,9 @@ export default async function handler(req, res) {
     all,
   } = req.query;
 
+  const creds        = getCredentials(req);
   const ids          = userIds ? userIds.split(',').map(s => s.trim()).filter(Boolean) : OMNI_TEAM_IDS;
-  const tempoToken   = process.env.TEMPO_API_TOKEN;
+  const tempoToken   = creds.tempoToken;
   const useTempoAPI  = !!tempoToken;
 
   const projInclude    = projectKeys         ? projectKeys.split(',').map(s => s.trim()).filter(Boolean) : [];
@@ -126,13 +127,13 @@ export default async function handler(req, res) {
         jql: `key in (${keys})`,
         fields: TICKET_FIELDS,
         maxResults: 500,
-      });
+      }, creds);
 
       let byIssue = {};
       if (useTempoAPI) {
-        const tempoWls = await fetchViaTempoAPI(dateFrom, dateTo, ids);
+        const tempoWls = await fetchViaTempoAPI(dateFrom, dateTo, ids, tempoToken);
         const uniqueIds = [...new Set(tempoWls.map(wl => wl.author?.accountId).filter(Boolean))];
-        const nameMap   = await resolveDisplayNames(uniqueIds);
+        const nameMap   = await resolveDisplayNames(uniqueIds, creds);
         byIssue = groupTempoByIssue(tempoWls, nameMap);
       }
 
@@ -157,9 +158,9 @@ export default async function handler(req, res) {
 
     // ── Main view ─────────────────────────────────────────────────────────────
     if (useTempoAPI) {
-      const tempoWls  = await fetchViaTempoAPI(dateFrom, dateTo, ids);
+      const tempoWls  = await fetchViaTempoAPI(dateFrom, dateTo, ids, tempoToken);
       const uniqueIds = [...new Set(tempoWls.map(wl => wl.author?.accountId).filter(Boolean))];
-      const nameMap   = await resolveDisplayNames(uniqueIds);
+      const nameMap   = await resolveDisplayNames(uniqueIds, creds);
       const byIssue   = groupTempoByIssue(tempoWls, nameMap);
 
       if (!Object.keys(byIssue).length) {
@@ -183,13 +184,13 @@ export default async function handler(req, res) {
           const jql  = `id in (${batch.join(',')})${pjClause}`;
           const data = await jiraPost('/rest/api/3/search/jql', {
             jql, fields: TICKET_FIELDS, maxResults: BATCH,
-          });
+          }, creds);
           allIssues.push(...(data.issues || []));
           let nextToken = data.nextPageToken || null;
           while (nextToken) {
             const pg = await jiraPost('/rest/api/3/search/jql', {
               jql, fields: TICKET_FIELDS, maxResults: BATCH, nextPageToken: nextToken,
-            });
+            }, creds);
             allIssues.push(...(pg.issues || []));
             nextToken = pg.nextPageToken || null;
           }
@@ -229,7 +230,7 @@ export default async function handler(req, res) {
               jql: `key in (${batch.map(k => `"${k}"`).join(',')})`,
               fields: TICKET_FIELDS,
               maxResults: 100,
-            });
+            }, creds);
             (d.issues || []).forEach(issue => {
               const t = mapTicket(issue, null, null);
               t.wlRangeSecs = 0; t.wlRangeHours = 0; t.wlByMonth = {}; t.wlByAuthor = {}; t.wlAuthors = [];
@@ -312,19 +313,19 @@ export default async function handler(req, res) {
       do {
         const body = { jql, fields: TICKET_FIELDS, maxResults: 100 };
         if (nextToken) body.nextPageToken = nextToken;
-        const data = await jiraPost('/rest/api/3/search/jql', body);
+        const data = await jiraPost('/rest/api/3/search/jql', body, creds);
         allIssues.push(...(data.issues || []));
         nextToken = data.nextPageToken || null;
       } while (nextToken);
 
-      const auth      = jiraAuth();
+      const auth      = jiraAuth(creds);
       const allTickets = allIssues.map(i => mapTicket(i, dateFrom, dateTo));
       const needsFull  = allTickets.filter(t => t.wlNeedsFullFetch);
       const BATCH = 8;
       for (let i = 0; i < needsFull.length; i += BATCH) {
         await Promise.all(needsFull.slice(i, i + BATCH).map(async t => {
           try {
-            const wls = await fetchRangeWorklogs(t.key, dateFrom, dateTo, auth);
+            const wls = await fetchRangeWorklogs(t.key, dateFrom, dateTo, auth, creds.jiraUrl);
             Object.assign(t, aggregateWorklogs(wls));
           } catch { /* best effort */ }
         }));
@@ -346,7 +347,7 @@ export default async function handler(req, res) {
           const d = await jiraPost('/rest/api/3/search/jql', {
             jql: `key in (${batch.map(k => `"${k}"`).join(',')})`,
             fields: TICKET_FIELDS, maxResults: 100,
-          });
+          }, creds);
           parentTickets.push(...(d.issues || []).map(i => mapTicket(i, dateFrom, dateTo)));
         } catch { /* best effort */ }
       }
